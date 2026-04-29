@@ -308,7 +308,9 @@ func matrixToPermalinkUser(userID id.UserID) string {
 }
 
 // convertVideoMessage downloads a shared TikTok video and uploads it to Matrix
-// as an m.video event, alongside an m.text part containing the original URL.
+// as an m.video event. Shared TikTok post titles/URLs are attached as the
+// media caption so Matrix receives one event instead of separate video + text
+// messages.
 // If the download or upload fails for any reason, it falls back to a plain-text
 // message with the URL so the user can still open it manually.
 //
@@ -390,56 +392,44 @@ func (tc *TikTokClient) convertVideoMessage(
 	content.URL = mxcURL
 	content.File = encFile
 
-	vmeta := messageMetaFromLib(msg)
-	parts := []*bridgev2.ConvertedMessagePart{
-		{
-			Type:       event.EventMessage,
-			Content:    content,
-			DBMetadata: vmeta,
-		},
-	}
 	if !isPrivateVideo {
-		linkBody := msg.MediaURL
-		if msg.Text != "" {
-			linkBody = msg.Text + "\n" + msg.MediaURL
-		}
-		parts = append(parts, &bridgev2.ConvertedMessagePart{
-			Type: event.EventMessage,
-			Content: &event.MessageEventContent{
-				MsgType:       event.MsgText,
-				Body:          linkBody,
-				Format:        event.FormatHTML,
-				FormattedBody: fmt.Sprintf(`<a href="%s">%s</a>`, msg.MediaURL, linkBody),
-			},
-			DBMetadata: vmeta,
-		})
+		applyTikTokVideoCaption(content, msg)
 	}
 
-	return &bridgev2.ConvertedMessage{Parts: parts}, nil
+	vmeta := messageMetaFromLib(msg)
+	return &bridgev2.ConvertedMessage{
+		Parts: []*bridgev2.ConvertedMessagePart{
+			{
+				Type:       event.EventMessage,
+				Content:    content,
+				DBMetadata: vmeta,
+			},
+		},
+	}, nil
 }
 
 // convertVideoFallback renders a TikTok video share as a plain-text message
 // containing the URL when media download is unavailable.
 func convertVideoFallback(msg libtiktok.Message) *bridgev2.ConvertedMessage {
-	body := msg.MediaURL
-	if msg.Text != "" {
-		body = msg.Text + "\n" + msg.MediaURL
-	}
+	body := tiktokVideoCaptionBody(msg)
 	if body == "" {
 		body = "[video]"
 	}
 
 	fmeta := messageMetaFromLib(msg)
+	content := &event.MessageEventContent{
+		MsgType: event.MsgText,
+		Body:    body,
+	}
+	if formattedBody := tiktokVideoCaptionHTML(msg); formattedBody != "" {
+		content.Format = event.FormatHTML
+		content.FormattedBody = formattedBody
+	}
 	return &bridgev2.ConvertedMessage{
 		Parts: []*bridgev2.ConvertedMessagePart{
 			{
-				Type: event.EventMessage,
-				Content: &event.MessageEventContent{
-					MsgType:       event.MsgText,
-					Body:          body,
-					Format:        event.FormatHTML,
-					FormattedBody: fmt.Sprintf(`<a href="%s">%s</a>`, msg.MediaURL, body),
-				},
+				Type:       event.EventMessage,
+				Content:    content,
 				DBMetadata: fmeta,
 			},
 		},
@@ -492,6 +482,45 @@ func convertImageFallback(msg libtiktok.Message) *bridgev2.ConvertedMessage {
 				DBMetadata: meta,
 			},
 		},
+	}
+}
+
+func applyTikTokVideoCaption(content *event.MessageEventContent, msg libtiktok.Message) {
+	body := tiktokVideoCaptionBody(msg)
+	if body == "" {
+		return
+	}
+	content.FileName = content.Body
+	content.Body = body
+	content.Format = event.FormatHTML
+	content.FormattedBody = tiktokVideoCaptionHTML(msg)
+}
+
+func tiktokVideoCaptionBody(msg libtiktok.Message) string {
+	text := strings.TrimSpace(msg.Text)
+	mediaURL := strings.TrimSpace(msg.MediaURL)
+	switch {
+	case text != "" && mediaURL != "":
+		return text + "\n" + mediaURL
+	case text != "":
+		return text
+	default:
+		return mediaURL
+	}
+}
+
+func tiktokVideoCaptionHTML(msg libtiktok.Message) string {
+	text := strings.TrimSpace(msg.Text)
+	mediaURL := strings.TrimSpace(msg.MediaURL)
+	switch {
+	case text != "" && mediaURL != "":
+		return event.TextToHTML(text) + `<br><a href="` + html.EscapeString(mediaURL) + `">` + html.EscapeString(mediaURL) + `</a>`
+	case text != "":
+		return event.TextToHTML(text)
+	case mediaURL != "":
+		return `<a href="` + html.EscapeString(mediaURL) + `">` + html.EscapeString(mediaURL) + `</a>`
+	default:
+		return ""
 	}
 }
 

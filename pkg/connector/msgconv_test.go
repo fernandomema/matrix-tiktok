@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/event"
 
 	"github.com/httpjamesm/matrix-tiktok/pkg/libtiktok"
 )
@@ -36,5 +37,34 @@ func TestConvertMessage_doesNotIgnoreFailedPrivateImage(t *testing.T) {
 	}
 	if cm == nil || len(cm.Parts) != 1 {
 		t.Fatalf("expected one converted part, got %+v", cm)
+	}
+}
+
+func TestApplyTikTokVideoCaption(t *testing.T) {
+	content := &event.MessageEventContent{
+		MsgType: event.MsgVideo,
+		Body:    "video.mp4",
+	}
+	msg := libtiktok.Message{
+		Type:     "video",
+		Text:     "A < B",
+		MediaURL: "https://www.tiktok.com/@user/video/123?x=1&y=2",
+	}
+
+	applyTikTokVideoCaption(content, msg)
+
+	if content.FileName != "video.mp4" {
+		t.Fatalf("FileName = %q, want original body as filename", content.FileName)
+	}
+	wantBody := "A < B\nhttps://www.tiktok.com/@user/video/123?x=1&y=2"
+	if content.Body != wantBody {
+		t.Fatalf("Body = %q, want %q", content.Body, wantBody)
+	}
+	if content.Format != event.FormatHTML {
+		t.Fatalf("Format = %q, want HTML", content.Format)
+	}
+	wantHTML := `A &lt; B<br><a href="https://www.tiktok.com/@user/video/123?x=1&amp;y=2">https://www.tiktok.com/@user/video/123?x=1&amp;y=2</a>`
+	if content.FormattedBody != wantHTML {
+		t.Fatalf("FormattedBody = %q, want %q", content.FormattedBody, wantHTML)
 	}
 }
