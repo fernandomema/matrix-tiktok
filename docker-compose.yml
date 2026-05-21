@@ -1,0 +1,16 @@
+services:
+  matrix-tiktok:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - tiktok-data:/data
+    command: >
+      sh -c '
+        exec /usr/local/bin/matrix-tiktok -c /data/config.yaml
+      '
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+volumes:
+  tiktok-data:
