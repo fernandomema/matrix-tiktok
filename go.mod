@@ -16,6 +16,8 @@ require (
 	maunium.net/go/mautrix v0.26.5-0.20260413182302-f3fab8d38470
 )
 
+replace maunium.net/go/mautrix => ./patches/mautrix
+
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
