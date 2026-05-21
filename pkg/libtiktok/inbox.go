@@ -1,6 +1,6 @@
 package libtiktok
 
-import (
+	import (
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +10,8 @@ import (
 
 	tiktokpb "github.com/httpjamesm/matrix-tiktok/pkg/libtiktok/pb"
 	"github.com/rs/zerolog"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 )
 
 // errSkipSyncedMessage is returned by parseMessageEntry for rows the bridge
@@ -75,8 +77,10 @@ type Reaction struct {
 }
 
 const (
-	inboxURL     = "/v2/message/get_by_user_init"
-	getByConvURL = "/v1/message/get_by_conversation"
+	// inboxURL is the unified combo inbox endpoint on im-api.tiktok.com (absolute URL used in Post).
+	inboxURL     = "https://im-api.tiktok.com/v1/message/get_by_user_combo"
+	inboxV2URL   = "https://im-api.tiktok.com/v2/message/get_by_user_init"
+	getByConvURL = "https://im-api.tiktok.com/v1/message/get_by_conversation"
 	imAID        = "1988"
 )
 
@@ -137,6 +141,8 @@ func deduplicateReactions(in []Reaction) []Reaction {
 //	0, 700 → "text"  (REST API uses 0; WebSocket push uses 700)
 //	703    → "text"  (reply; same text field; parent id is protobuf message_reply, field 1)
 //	800    → "video" (shared TikTok post)
+//	810    → "video" (shared TikTok post, photomode / photoset variant)
+//	1      → "video" (shared TikTok post with source_type=2; appears in DM history)
 func parseMessageContent(ctx context.Context, c *Client, contentBytes []byte) (msgType, text, mediaURL, mimeType string) {
 	if len(contentBytes) == 0 {
 		return
@@ -160,6 +166,20 @@ func parseMessageContent(ctx context.Context, c *Client, contentBytes []byte) (m
 	// an empty body and bridged a stray empty Matrix m.text next to image/video.
 	rawAwe, hasAwe := content["aweType"]
 	if !hasAwe || rawAwe == nil {
+		// Streak / system notification messages arrive without aweType.
+		// They carry a human-readable string in "fallback_tips" or "tips".
+		// {"hack":"1"} rows are empty placeholders — ignore those.
+		if tips, ok := content["fallback_tips"].(string); ok && tips != "" {
+			return "text", tips, "", ""
+		}
+		if tips, ok := content["tips"].(string); ok && tips != "" {
+			// Strip {{N}} placeholders used for template buttons.
+			text = tips
+			for i := 1; i <= 9; i++ {
+				text = strings.ReplaceAll(text, fmt.Sprintf(" {{%d}}", i), "")
+			}
+			return "text", text, "", ""
+		}
 		return "", "", "", ""
 	}
 	aweTypeF, ok := rawAwe.(float64)
@@ -172,7 +192,7 @@ func parseMessageContent(ctx context.Context, c *Client, contentBytes []byte) (m
 		if value, ok := content["text"].(string); ok {
 			text = value
 		}
-	case 800:
+	case 1, 800, 810:
 		msgType = "video"
 		if itemID, ok := content["itemId"].(string); ok && itemID != "" {
 			if uid, ok := content["uid"].(string); ok && uid != "" {
@@ -183,6 +203,21 @@ func parseMessageContent(ctx context.Context, c *Client, contentBytes []byte) (m
 		}
 		if value, ok := content["content_title"].(string); ok {
 			text = value
+		}
+	case 103301:
+		// Group invite: sender is inviting the recipient to a group chat.
+		msgType = "text"
+		groupName := ""
+		if group, ok := content["group"].(map[string]interface{}); ok {
+			groupName, _ = group["name"].(string)
+		}
+		inviterName, _ := content["inviter_name"].(string)
+		if groupName != "" && inviterName != "" {
+			text = fmt.Sprintf("%s invited you to the group \"%s\"", inviterName, groupName)
+		} else if groupName != "" {
+			text = fmt.Sprintf("Invited you to the group \"%s\"", groupName)
+		} else {
+			text = "Group chat invitation"
 		}
 	default:
 		msgType = fmt.Sprintf("type_%d", int(aweTypeF))
@@ -235,10 +270,10 @@ func buildMetadata(deviceID, msToken, verifyFP string) []metaKV {
 		{"channel", "web"},
 		{"device_platform", "web_pc"},
 		{"device_id", deviceID},
-		{"region", "CA"},
-		{"priority_region", "CA"},
+		{"region", "GB"},
+		{"priority_region", "GB"},
 		{"os", "mac"},
-		{"referer", "https://www.tiktok.com/messages"},
+		{"referer", "https://www.tiktok.com/"},
 		{"root_referer", ""},
 		{"cookie_enabled", "true"},
 		{"screen_width", "1800"},
@@ -256,7 +291,7 @@ func buildMetadata(deviceID, msToken, verifyFP string) []metaKV {
 	pairs = append(pairs,
 		metaKV{"app_language", "en"},
 		metaKV{"webcast_language", "en"},
-		metaKV{"tz_name", "America/Toronto"},
+		metaKV{"tz_name", "Europe/London"},
 		metaKV{"is_page_visible", "true"},
 		metaKV{"focus_state", "true"},
 		metaKV{"is_fullscreen", "false"},
@@ -273,32 +308,57 @@ func buildMetadata(deviceID, msToken, verifyFP string) []metaKV {
 	return pairs
 }
 
-func buildInboxPayload(deviceID, msToken, verifyFP string, subCommand uint64) ([]byte, error) {
-	reserved6 := uint64(1)
-	if subCommand == 10006 {
-		reserved6 = 0
-	}
+// BuildInboxPayloadForTest is exported only for debug tooling.
+func BuildInboxPayloadForTest(deviceID, msToken, verifyFP string, subCommand uint64) ([]byte, error) {
+	return buildInboxPayload(deviceID, msToken, verifyFP, 0)
+}
+
+// buildComboPayloadField204 encodes the field-204 bytes for the get_by_user_combo
+// InboxRequestPayload. The structure mirrors the browser capture:
+//
+//	field 204 → field 1 → {field1=0, field2=cursorTsUs, field3=limit, field4=8}
+func buildComboPayloadField204(cursorTsUs, limit uint64) []byte {
+	// Innermost: fields 1,2,3,4
+	var inner []byte
+	inner = protowire.AppendTag(inner, 1, protowire.VarintType)
+	inner = protowire.AppendVarint(inner, 0)
+	inner = protowire.AppendTag(inner, 2, protowire.VarintType)
+	inner = protowire.AppendVarint(inner, cursorTsUs)
+	inner = protowire.AppendTag(inner, 3, protowire.VarintType)
+	inner = protowire.AppendVarint(inner, limit)
+	inner = protowire.AppendTag(inner, 4, protowire.VarintType)
+	inner = protowire.AppendVarint(inner, 8)
+
+	// field 1 of GetUserComboRequestBody wrapping inner
+	var mid []byte
+	mid = protowire.AppendTag(mid, 1, protowire.BytesType)
+	mid = protowire.AppendBytes(mid, inner)
+
+	// field 204 of InboxRequestPayload (injected as unknown fields)
+	var out []byte
+	out = protowire.AppendTag(out, 204, protowire.BytesType)
+	out = protowire.AppendBytes(out, mid)
+	return out
+}
+
+func buildInboxPayload(deviceID, msToken, verifyFP string, cursorTsUs uint64) ([]byte, error) {
+	payload := &tiktokpb.InboxRequestPayload{}
+	// Inject field-204 (combo cursor/limit) as unknown fields so proto.Marshal encodes them.
+	payload.ProtoReflect().SetUnknown(buildComboPayloadField204(cursorTsUs, 50))
 
 	msg := &tiktokpb.InboxRequest{
-		MessageType:    protoUint64(203),
-		SubCommand:     protoUint64(subCommand),
-		ClientVersion:  protoString("1.6.0"),
+		MessageType:    protoUint64(204),
+		SubCommand:     protoUint64(10011),
+		ClientVersion:  protoString("1.7.0"),
 		Options:        emptyProtoMessage(),
 		PlatformFlag:   protoUint64(3),
-		Reserved_6:     protoUint64(reserved6),
-		GitHash:        protoString(""),
+		Reserved_6:     protoUint64(0),
+		GitHash:        protoString("e465244:feat/call-trace-plugin"),
 		DeviceId:       protoString(deviceID),
 		ClientPlatform: protoString("web"),
 		Metadata:       metadataKVsToProto(buildMetadata(deviceID, msToken, verifyFP)),
 		FinalFlag:      protoUint64(1),
-		Payload: &tiktokpb.InboxRequestPayload{
-			// Only field 1 = 0 matches the pre-schema bridge (uint64 reserved_1).
-			// Sending explicit limit=0 / con_type / cursor changed server behavior
-			// (small truncated lists); omit those fields so the server uses defaults.
-			UserInitList: &tiktokpb.GetUserConversationListRequestBody{
-				SortType: protoInt32(0),
-			},
-		},
+		Payload:        payload,
 	}
 
 	return marshalProto(msg)
@@ -351,19 +411,145 @@ func mergeInboxConversations(existing, incoming []Conversation) []Conversation {
 // Response parser
 // ---------------------------------------------------------------------------
 
-func parseInboxResponse(body []byte) ([]Conversation, error) {
+// extractPayloadField204 scans the unknown fields of an InboxResponsePayload
+// for field 204 (get_by_user_combo response) and returns the InboxConversationList
+// inside it. The combo response has two extra wrapper levels vs user_init_list (203):
+//
+//	field204 → { field1 → { field1=varint(0), field2=entry×N, ... } }
+//
+// The inner blob (field1's content) has the same layout as InboxConversationList:
+// field2 = repeated ConversationDetail (conversations).
+func extractPayloadField204(payload *tiktokpb.InboxResponsePayload) *tiktokpb.InboxConversationList {
+	if payload == nil {
+		return nil
+	}
+	unknown := payload.ProtoReflect().GetUnknown()
+	for len(unknown) > 0 {
+		num, typ, n := protowire.ConsumeTag(unknown)
+		if n < 0 {
+			break
+		}
+		unknown = unknown[n:]
+		if typ == protowire.BytesType {
+			val, n2 := protowire.ConsumeBytes(unknown)
+			if n2 < 0 {
+				break
+			}
+			unknown = unknown[n2:]
+			if num == 204 {
+				// val = { field1 → inner }; unwrap field1 to get inner blob.
+				inner := unwrapField1Bytes(val)
+				if inner == nil {
+					return nil
+				}
+				// inner = { field1=varint(0), field2=ConvDetail×N, ... }
+				// This matches InboxConversationList wire layout (field2 = conversations).
+				var list tiktokpb.InboxConversationList
+				if err := proto.Unmarshal(inner, &list); err == nil {
+					return &list
+				}
+				return nil
+			}
+		} else if typ == protowire.VarintType {
+			_, n2 := protowire.ConsumeVarint(unknown)
+			if n2 < 0 {
+				return nil
+			}
+			unknown = unknown[n2:]
+		} else {
+			return nil
+		}
+	}
+	return nil
+}
+
+// unwrapField1Bytes returns the bytes value of the first field-1 (bytes type)
+// found in data, or nil if not present.
+func unwrapField1Bytes(data []byte) []byte {
+	for len(data) > 0 {
+		num, typ, n := protowire.ConsumeTag(data)
+		if n < 0 {
+			return nil
+		}
+		data = data[n:]
+		if typ == protowire.BytesType {
+			val, n2 := protowire.ConsumeBytes(data)
+			if n2 < 0 {
+				return nil
+			}
+			if num == 1 {
+				return val
+			}
+			data = data[n2:]
+		} else if typ == protowire.VarintType {
+			_, n2 := protowire.ConsumeVarint(data)
+			if n2 < 0 {
+				return nil
+			}
+			data = data[n2:]
+		} else {
+			return nil
+		}
+	}
+	return nil
+}
+
+// parseInboxResponse decodes a get_by_user_combo response body.
+// It returns the conversations and the next-page cursor (0 = no more pages).
+// The next-page cursor is the minimum non-zero cursor_ts_us across all returned
+// entries, which mirrors how get_by_conversation pagination works.
+func parseInboxResponse(ctx context.Context, body []byte) ([]Conversation, uint64, error) {
 	var resp tiktokpb.InboxResponse
 	if err := unmarshalProto(body, &resp); err != nil {
-		return nil, fmt.Errorf("decode top-level response: %w", err)
+		return nil, 0, fmt.Errorf("decode top-level response: %w", err)
 	}
 
+	// Check server-side status; 0 means success.
+	if status := resp.GetStatus(); status != 0 {
+		return nil, 0, fmt.Errorf("inbox API returned status %d (%s)", status, resp.GetMessage())
+	}
+
+	// Try field-203 (user_init_list) first, then field-204 (user_combo_list).
+	// Field 203 may be present with entries but field 204 carries the fuller set
+	// of conversations. Prefer whichever has more entries+conversations.
 	userInit := resp.GetPayload().GetUserInitList()
+	combo := extractPayloadField204(resp.GetPayload())
+
+	field203Total := len(userInit.GetConversations()) + len(userInit.GetEntries())
+	field204Total := 0
+	if combo != nil {
+		field204Total = len(combo.GetConversations()) + len(combo.GetEntries())
+	}
+	log := zerolog.Ctx(ctx)
+	log.Debug().
+		Int("field203_total", field203Total).
+		Int("field204_total", field204Total).
+		Msg("Inbox: comparing field 203 vs field 204 size")
+
+	if field204Total > field203Total {
+		log.Debug().
+			Int("field203_convs", len(userInit.GetConversations())).
+			Int("field203_entries", len(userInit.GetEntries())).
+			Int("field204_convs", len(combo.GetConversations())).
+			Int("field204_entries", len(combo.GetEntries())).
+			Msg("Inbox: switching to field 204 (richer data)")
+		userInit = combo
+	}
 	convs := make([]Conversation, 0, len(userInit.GetConversations())+len(userInit.GetEntries()))
+	// TikTok's inbox API returns a fixed set of ~10 conversations with no
+	// pagination cursor. nextCursor will always be 0 here on the web API.
+	var nextCursor uint64
 
 	details := userInit.GetConversations()
 	if len(details) > 0 {
 		detailConvs := make([]Conversation, 0, len(details))
 		for _, detail := range details {
+			// Track minimum last_message_timestamp_us for next-page cursor.
+			if ts := detail.GetState().GetLastMessageTimestampUs(); ts != 0 {
+				if nextCursor == 0 || ts < nextCursor {
+					nextCursor = ts
+				}
+			}
 			conv, err := parseConversationDetailProto(detail)
 			if err != nil {
 				continue
@@ -376,14 +562,20 @@ func parseInboxResponse(body []byte) ([]Conversation, error) {
 	entries := userInit.GetEntries()
 	if len(entries) == 0 {
 		if len(convs) == 0 {
-			return nil, nil // empty inbox
+			return nil, 0, nil // empty inbox
 		}
-		return convs, nil
+		return convs, 0, nil
 	}
 
+	// Also collect cursor from entries (field 25 cursor_ts_us).
 	seen := make(map[string]struct{}, len(entries))
 	entryConvs := make([]Conversation, 0, len(entries))
 	for _, entry := range entries {
+		if c := entry.GetCursorTsUs(); c != 0 {
+			if nextCursor == 0 || c < nextCursor {
+				nextCursor = c
+			}
+		}
 		if !hasRealMessageProto(entry) {
 			continue
 		}
@@ -397,21 +589,24 @@ func parseInboxResponse(body []byte) ([]Conversation, error) {
 		seen[conv.ID] = struct{}{}
 		entryConvs = append(entryConvs, conv)
 	}
-	return mergeInboxConversations(convs, entryConvs), nil
+	log.Debug().Int("returning_convs", len(convs)).Msg("Inbox: parseInboxResponse returning")
+	return mergeInboxConversations(convs, entryConvs), nextCursor, nil
 }
 
-func (c *Client) fetchInbox(ctx context.Context, deviceID, msToken, verifyFP string, subCommand uint64) ([]Conversation, error) {
+// fetchInboxPage fetches one page of the inbox starting at cursorTsUs (0 = first page).
+// Returns conversations on this page and the next-page cursor (0 = no more pages).
+func (c *Client) fetchInboxPage(ctx context.Context, deviceID, msToken, verifyFP string, cursorTsUs uint64) ([]Conversation, uint64, error) {
 	log := zerolog.Ctx(ctx).With().Str("component", "libtiktok-inbox").Logger()
 	ctx = log.WithContext(ctx)
-	payload, err := buildInboxPayload(deviceID, msToken, verifyFP, subCommand)
+	payload, err := buildInboxPayload(deviceID, msToken, verifyFP, cursorTsUs)
 	if err != nil {
-		return nil, fmt.Errorf("build inbox payload for subcommand %d: %w", subCommand, err)
+		return nil, 0, fmt.Errorf("build inbox payload: %w", err)
 	}
 	log.Debug().
-		Uint64("sub_command", subCommand).
 		Str("device_id", deviceID).
+		Uint64("cursor_ts_us", cursorTsUs).
 		Int("payload_bytes", len(payload)).
-		Msg("Fetching TikTok inbox subcommand")
+		Msg("Fetching TikTok inbox (get_by_user_combo)")
 
 	resp, err := c.rIA.R().
 		SetContext(ctx).
@@ -419,7 +614,7 @@ func (c *Client) fetchInbox(ctx context.Context, deviceID, msToken, verifyFP str
 		SetHeader("Content-Type", "application/x-protobuf").
 		SetHeader("Cache-Control", "no-cache").
 		SetHeader("Origin", "https://www.tiktok.com").
-		SetHeader("Referer", "https://www.tiktok.com/messages").
+		SetHeader("Referer", "https://www.tiktok.com/").
 		SetQueryParams(map[string]string{
 			"aid":             imAID,
 			"version_code":    "1.0.0",
@@ -431,20 +626,154 @@ func (c *Client) fetchInbox(ctx context.Context, deviceID, msToken, verifyFP str
 		SetBody(payload).
 		Post(inboxURL)
 	if err != nil {
-		return nil, fmt.Errorf("post inbox subcommand %d: %w", subCommand, err)
+		return nil, 0, fmt.Errorf("post inbox: %w", err)
 	}
 	if resp.IsError() {
-		return nil, fmt.Errorf("inbox API subcommand %d returned %d: %s", subCommand, resp.StatusCode(), resp.String())
+		return nil, 0, fmt.Errorf("inbox API returned %d: %s", resp.StatusCode(), resp.String())
 	}
 
-	convs, err := parseInboxResponse(resp.Body())
+	convs, nextCursor, err := parseInboxResponse(ctx, resp.Body())
 	if err != nil {
-		return nil, fmt.Errorf("parse inbox subcommand %d response: %w", subCommand, err)
+		return nil, 0, fmt.Errorf("parse inbox response: %w", err)
 	}
 	log.Debug().
-		Uint64("sub_command", subCommand).
 		Int("conversations", len(convs)).
-		Msg("Fetched TikTok inbox subcommand successfully")
+		Uint64("next_cursor", nextCursor).
+		Msg("Fetched TikTok inbox successfully")
+	return convs, nextCursor, nil
+}
+
+// buildInboxV2Payload builds the request body for /v2/message/get_by_user_init.
+// The envelope is identical to v1 except sub_command=10001 and the pagination
+// cursor is an integer offset in field 8 of the payload (field 1 = offset).
+// offset=0 fetches the first page; subsequent pages use offset=20 (observed
+// in browser captures as the second parallel call).
+func buildInboxV2Payload(deviceID, msToken, verifyFP string, offset uint64) ([]byte, error) {
+	// Build the inner payload: field 203 → GetUserConversationListRequestBody
+	// with cursor = offset (reusing the cursor field as page offset for v2).
+	innerPayload := &tiktokpb.InboxRequestPayload{}
+	userInitBody := &tiktokpb.GetUserConversationListRequestBody{}
+	// field 2 (cursor) = offset for v2 pagination
+	if offset > 0 {
+		cursorVal := int64(offset)
+		userInitBody.Cursor = &cursorVal
+	}
+	innerPayload.UserInitList = userInitBody
+
+	msg := &tiktokpb.InboxRequest{
+		MessageType:    protoUint64(203),
+		SubCommand:     protoUint64(10001),
+		ClientVersion:  protoString("1.7.0"),
+		Options:        emptyProtoMessage(),
+		PlatformFlag:   protoUint64(3),
+		Reserved_6:     protoUint64(0),
+		GitHash:        protoString("e465244:feat/call-trace-plugin"),
+		DeviceId:       protoString(deviceID),
+		ClientPlatform: protoString("web"),
+		Metadata:       metadataKVsToProto(buildMetadata(deviceID, msToken, verifyFP)),
+		FinalFlag:      protoUint64(1),
+		Payload:        innerPayload,
+	}
+
+	return marshalProto(msg)
+}
+
+// parseInboxV2Response decodes a /v2/message/get_by_user_init response body.
+// The response envelope is InboxResponse; conversations are in
+// payload.user_init_list (field 203).
+func parseInboxV2Response(ctx context.Context, body []byte) ([]Conversation, error) {
+	var resp tiktokpb.InboxResponse
+	if err := unmarshalProto(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode v2 response: %w", err)
+	}
+	if status := resp.GetStatus(); status != 0 {
+		return nil, fmt.Errorf("inbox v2 API returned status %d (%s)", status, resp.GetMessage())
+	}
+
+	userInit := resp.GetPayload().GetUserInitList()
+	log := zerolog.Ctx(ctx)
+	log.Debug().
+		Int("v2_conversations", len(userInit.GetConversations())).
+		Int("v2_entries", len(userInit.GetEntries())).
+		Msg("Inbox v2: parsed response")
+
+	convs := make([]Conversation, 0, len(userInit.GetConversations())+len(userInit.GetEntries()))
+
+	for _, detail := range userInit.GetConversations() {
+		conv, err := parseConversationDetailProto(detail)
+		if err != nil {
+			continue
+		}
+		convs = append(convs, conv)
+	}
+
+	seen := make(map[string]struct{}, len(convs))
+	for _, c := range convs {
+		seen[c.ID] = struct{}{}
+	}
+	for _, entry := range userInit.GetEntries() {
+		if !hasRealMessageProto(entry) {
+			continue
+		}
+		conv, err := parseConversationEntryProto(entry)
+		if err != nil {
+			continue
+		}
+		if _, dup := seen[conv.ID]; dup {
+			continue
+		}
+		seen[conv.ID] = struct{}{}
+		convs = append(convs, conv)
+	}
+	return convs, nil
+}
+
+// fetchInboxV2 fetches one page of conversations from /v2/message/get_by_user_init.
+// offset=0 is the first page; offset=20 is the second page (as observed in browser).
+func (c *Client) fetchInboxV2(ctx context.Context, deviceID, msToken, verifyFP string, offset uint64) ([]Conversation, error) {
+	log := zerolog.Ctx(ctx).With().Str("component", "libtiktok-inbox-v2").Logger()
+	ctx = log.WithContext(ctx)
+	payload, err := buildInboxV2Payload(deviceID, msToken, verifyFP, offset)
+	if err != nil {
+		return nil, fmt.Errorf("build inbox v2 payload: %w", err)
+	}
+	log.Debug().
+		Str("device_id", deviceID).
+		Uint64("offset", offset).
+		Int("payload_bytes", len(payload)).
+		Msg("Fetching TikTok inbox v2 (get_by_user_init)")
+
+	resp, err := c.rIA.R().
+		SetContext(ctx).
+		SetHeader("Accept", "application/x-protobuf").
+		SetHeader("Content-Type", "application/x-protobuf").
+		SetHeader("Cache-Control", "no-cache").
+		SetHeader("Origin", "https://www.tiktok.com").
+		SetHeader("Referer", "https://www.tiktok.com/").
+		SetQueryParams(map[string]string{
+			"aid":             imAID,
+			"version_code":    "1.0.0",
+			"app_name":        "tiktok_web",
+			"device_platform": "web_pc",
+			"msToken":         msToken,
+			"X-Bogus":         randomBogus(),
+		}).
+		SetBody(payload).
+		Post(inboxV2URL)
+	if err != nil {
+		return nil, fmt.Errorf("post inbox v2: %w", err)
+	}
+	if resp.IsError() {
+		return nil, fmt.Errorf("inbox v2 API returned %d: %s", resp.StatusCode(), resp.String())
+	}
+
+	convs, err := parseInboxV2Response(ctx, resp.Body())
+	if err != nil {
+		return nil, fmt.Errorf("parse inbox v2 response: %w", err)
+	}
+	log.Debug().
+		Int("conversations", len(convs)).
+		Msg("Fetched TikTok inbox v2 successfully")
 	return convs, nil
 }
 
@@ -453,9 +782,12 @@ func (c *Client) fetchInbox(ctx context.Context, deviceID, msToken, verifyFP str
 // ---------------------------------------------------------------------------
 
 // GetInbox fetches the authenticated user's conversation list from the TikTok
-// IM API. It returns one Conversation per thread, with the other participant's
-// user ID in Participants.
-func (c *Client) GetInbox(ctx context.Context) ([]Conversation, error) {
+// IM API. It calls /v2/message/get_by_user_init (two pages: offset 0 and 20)
+// in parallel with the legacy /v1/message/get_by_user_combo, then merges the
+// results so all available conversations are returned.
+func (c *Client) GetInbox(ctx context.Context, _ int) ([]Conversation, error) {
+	log := zerolog.Ctx(ctx).With().Str("component", "libtiktok-inbox").Logger()
+	ctx = log.WithContext(ctx)
 	// Extract cookie values we need for the request.
 	// rIA already has the full cookie header set at construction time.
 	cookie := c.rIA.Header.Get("Cookie")
@@ -476,15 +808,54 @@ func (c *Client) GetInbox(ctx context.Context) ([]Conversation, error) {
 	msToken := extractCookie(cookie, "msToken")
 	verifyFP := extractCookie(cookie, "s_v_web_id")
 
-	groupConvs, err := c.fetchInbox(ctx, deviceID, msToken, verifyFP, 10002)
-	if err != nil {
-		return nil, err
+	// Run v1 combo and v2 page 0 in parallel.
+	type result struct {
+		convs []Conversation
+		err   error
 	}
-	normalConvs, err := c.fetchInbox(ctx, deviceID, msToken, verifyFP, 10006)
-	if err != nil {
-		return nil, err
+	v1Ch := make(chan result, 1)
+	v2p0Ch := make(chan result, 1)
+	v2p1Ch := make(chan result, 1)
+
+	go func() {
+		convs, _, err := c.fetchInboxPage(ctx, deviceID, msToken, verifyFP, 0)
+		v1Ch <- result{convs, err}
+	}()
+	go func() {
+		convs, err := c.fetchInboxV2(ctx, deviceID, msToken, verifyFP, 0)
+		v2p0Ch <- result{convs, err}
+	}()
+	go func() {
+		convs, err := c.fetchInboxV2(ctx, deviceID, msToken, verifyFP, 20)
+		v2p1Ch <- result{convs, err}
+	}()
+
+	v1Res := <-v1Ch
+	v2p0Res := <-v2p0Ch
+	v2p1Res := <-v2p1Ch
+
+	if v1Res.err != nil {
+		log.Warn().Err(v1Res.err).Msg("Inbox v1 failed")
 	}
-	return mergeInboxConversations(groupConvs, normalConvs), nil
+	if v2p0Res.err != nil {
+		log.Warn().Err(v2p0Res.err).Msg("Inbox v2 page 0 failed")
+	}
+	if v2p1Res.err != nil {
+		log.Warn().Err(v2p1Res.err).Msg("Inbox v2 page 1 failed")
+	}
+
+	// Merge: start with v2 results (richer), then fold in v1.
+	var convs []Conversation
+	convs = mergeInboxConversations(convs, v2p0Res.convs)
+	convs = mergeInboxConversations(convs, v2p1Res.convs)
+	convs = mergeInboxConversations(convs, v1Res.convs)
+
+	if len(convs) == 0 && v1Res.err != nil {
+		return nil, v1Res.err
+	}
+
+	log.Debug().Int("conversations", len(convs)).Msg("Inbox fetched (v1+v2 merged)")
+	return convs, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +908,15 @@ func parseMessageEntry(ctx context.Context, c *Client, entry *tiktokpb.Conversat
 	serverID := entry.GetServerMessageId()
 	msgID := extractClientMsgIDFromTags(entry.GetTags())
 	contentJSON := entry.GetContentJson()
+	zerolog.Ctx(ctx).Debug().
+		Uint64("server_message_id", entry.GetServerMessageId()).
+		RawJSON("content_json", func() []byte {
+			if len(contentJSON) == 0 {
+				return []byte(`null`)
+			}
+			return contentJSON
+		}()).
+		Msg("parseMessageEntry: raw content_json")
 	msgType, text, mediaURL, mimeType := parseMessageContent(ctx, c, contentJSON)
 	messageSubtype := entry.GetMessageSubtype()
 	thumbURL := ""

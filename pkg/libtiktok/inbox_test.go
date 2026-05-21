@@ -160,7 +160,7 @@ func TestParseInboxResponse_GroupSummaryEntry(t *testing.T) {
 		},
 	})
 
-	convs, err := parseInboxResponse(body)
+	convs, _, err := parseInboxResponse(context.Background(), body)
 	if err != nil {
 		t.Fatalf("parseInboxResponse returned error: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestParseInboxResponse_PrefersConversationDetails(t *testing.T) {
 		},
 	})
 
-	convs, err := parseInboxResponse(body)
+	convs, _, err := parseInboxResponse(context.Background(), body)
 	if err != nil {
 		t.Fatalf("parseInboxResponse returned error: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestParseInboxResponse_MergesDetailAndLegacyEntries(t *testing.T) {
 		},
 	})
 
-	convs, err := parseInboxResponse(body)
+	convs, _, err := parseInboxResponse(context.Background(), body)
 	if err != nil {
 		t.Fatalf("parseInboxResponse returned error: %v", err)
 	}
@@ -341,7 +341,7 @@ func TestMergeInboxConversations(t *testing.T) {
 }
 
 func TestBuildInboxPayloadMatchesObservedGroupChatVariant(t *testing.T) {
-	payload, err := buildInboxPayload(syntheticDeviceID, "ms-token", "verify-fp", 10002)
+	payload, err := buildInboxPayload(syntheticDeviceID, "ms-token", "verify-fp", 0)
 	if err != nil {
 		t.Fatalf("buildInboxPayload: %v", err)
 	}
@@ -351,26 +351,27 @@ func TestBuildInboxPayloadMatchesObservedGroupChatVariant(t *testing.T) {
 		t.Fatalf("unmarshal inbox payload: %v", err)
 	}
 
-	if req.GetMessageType() != 203 {
-		t.Fatalf("message_type = %d, want 203", req.GetMessageType())
+	if req.GetMessageType() != 204 {
+		t.Fatalf("message_type = %d, want 204", req.GetMessageType())
 	}
-	if req.GetSubCommand() != 10002 {
-		t.Fatalf("sub_command = %d, want 10002", req.GetSubCommand())
+	if req.GetSubCommand() != 10011 {
+		t.Fatalf("sub_command = %d, want 10011", req.GetSubCommand())
 	}
-	if req.GetReserved_6() != 1 {
-		t.Fatalf("reserved_6 = %d, want 1", req.GetReserved_6())
+	if req.GetReserved_6() != 0 {
+		t.Fatalf("reserved_6 = %d, want 0", req.GetReserved_6())
 	}
-	init := req.GetPayload().GetUserInitList()
-	if init.GetSortType() != 0 || init.GetCursor() != 0 || init.GetConType() != 0 || init.GetLimit() != 0 {
-		t.Fatalf("payload.user_init_list = sort_type %d cursor %d con_type %d limit %d, want minimal 0,0,0,0",
-			init.GetSortType(), init.GetCursor(), init.GetConType(), init.GetLimit())
+	if req.GetClientVersion() != "1.7.0" {
+		t.Fatalf("client_version = %q, want 1.7.0", req.GetClientVersion())
+	}
+	if req.GetGitHash() != "e465244:feat/call-trace-plugin" {
+		t.Fatalf("git_hash = %q, want e465244:feat/call-trace-plugin", req.GetGitHash())
 	}
 	if req.GetDeviceId() != syntheticDeviceID {
 		t.Fatalf("device_id = %q", req.GetDeviceId())
 	}
 
 	metadata := req.GetMetadata()
-	if got := metadataValue(metadata, "referer"); got != "https://www.tiktok.com/messages" {
+	if got := metadataValue(metadata, "referer"); got != "https://www.tiktok.com/" {
 		t.Fatalf("referer = %q", got)
 	}
 	if got := metadataValue(metadata, "browser_version"); got != DefaultUserAgent {
@@ -388,6 +389,10 @@ func TestBuildInboxPayloadMatchesObservedGroupChatVariant(t *testing.T) {
 }
 
 func TestBuildInboxPayloadSupportsNormalConversationVariant(t *testing.T) {
+	// The combo endpoint replaces both the group-chat and normal-conversation
+	// sub-commands with a single call (sub_command=10011). This test verifies
+	// that a second call with the old sub_command=10006 still produces a valid
+	// combo payload (sub_command arg is now ignored).
 	payload, err := buildInboxPayload(syntheticDeviceID, "ms-token", "verify-fp", 10006)
 	if err != nil {
 		t.Fatalf("buildInboxPayload: %v", err)
@@ -397,8 +402,9 @@ func TestBuildInboxPayloadSupportsNormalConversationVariant(t *testing.T) {
 	if err := unmarshalProto(payload, &req); err != nil {
 		t.Fatalf("unmarshal inbox payload: %v", err)
 	}
-	if req.GetSubCommand() != 10006 {
-		t.Fatalf("sub_command = %d, want 10006", req.GetSubCommand())
+	// Always uses the new combo sub_command regardless of the argument.
+	if req.GetSubCommand() != 10011 {
+		t.Fatalf("sub_command = %d, want 10011", req.GetSubCommand())
 	}
 	if req.GetReserved_6() != 0 {
 		t.Fatalf("reserved_6 = %d, want 0", req.GetReserved_6())

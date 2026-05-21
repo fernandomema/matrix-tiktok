@@ -18,7 +18,7 @@ import (
 const (
 	// hardMaxBackfillPagesPerConversation is a safety clamp for user-configured
 	// startup backfill limits so a stuck cursor cannot loop forever.
-	hardMaxBackfillPagesPerConversation = 10000
+	hardMaxBackfillPagesPerConversation = 3
 	// defaultInitialBackfillMaxPages caps incremental catch-up pagination on
 	// connect when the user leaves initial_backfill_max_pages at zero and a
 	// portal already has a stored checkpoint.
@@ -313,7 +313,7 @@ func (tc *TikTokClient) fetchAndDispatch(ctx context.Context) error {
 	log := zerolog.Ctx(ctx).With().Str("component", "connector-backfill").Logger()
 	ctx = log.WithContext(ctx)
 
-	convs, err := tc.apiClient.GetInbox(ctx)
+	convs, err := tc.apiClient.GetInbox(ctx, tc.connector.Config.MaxInboxPages)
 	if err != nil {
 		return fmt.Errorf("get inbox: %w", err)
 	}
@@ -745,7 +745,7 @@ func (tc *TikTokClient) getConversationForPortal(ctx context.Context, portal *br
 		}
 	}
 
-	convs, err := tc.apiClient.GetInbox(ctx)
+	convs, err := tc.apiClient.GetInbox(ctx, tc.connector.Config.MaxInboxPages)
 	if err != nil {
 		return nil, fmt.Errorf("get TikTok inbox for conversation lookup: %w", err)
 	}

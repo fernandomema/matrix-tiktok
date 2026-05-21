@@ -11,11 +11,53 @@ import (
 
 const DefaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 
+// Default TikTok IM API and WebSocket hosts (no region suffix).
+const (
+	DefaultIMAPIHost = "im-api.tiktok.com"
+	DefaultIMWSHost  = "im-ws.tiktok.com"
+)
+
+// ClientConfig holds optional overrides for the TikTok API hosts and HTTP
+// user-agent. Zero values fall back to built-in defaults.
+type ClientConfig struct {
+	// IMAPIHost is the hostname (no scheme) for the TikTok IM REST API.
+	// Default: im-api.tiktok.com
+	IMAPIHost string
+	// IMWSHost is the hostname (no scheme) for the TikTok IM WebSocket.
+	// Default: im-ws.tiktok.com
+	IMWSHost string
+	// UserAgent overrides the default HTTP User-Agent header.
+	UserAgent string
+}
+
+func (c ClientConfig) imAPIHost() string {
+	if c.IMAPIHost != "" {
+		return c.IMAPIHost
+	}
+	return DefaultIMAPIHost
+}
+
+func (c ClientConfig) imWSHost() string {
+	if c.IMWSHost != "" {
+		return c.IMWSHost
+	}
+	return DefaultIMWSHost
+}
+
+func (c ClientConfig) userAgent() string {
+	if c.UserAgent != "" {
+		return c.UserAgent
+	}
+	return DefaultUserAgent
+}
+
 type Client struct {
 	// r is the client for www.tiktok.com
 	r *resty.Client
 	// rIA is the client for the IM API specifically
 	rIA *resty.Client
+	// cfg holds resolved host/UA settings
+	cfg ClientConfig
 }
 
 type MessagesUniversalData map[string]any
@@ -34,8 +76,9 @@ func (m MessagesUniversalData) getAppContext() (map[string]any, error) {
 	return appContext, nil
 }
 
-// GetMessages fetches /messages, extracts the #__UNIVERSAL_DATA_FOR_REHYDRATION__
-// script tag, and returns its contents as a parsed JSON map.
+// getMessagesUniversalData fetches /messages, extracts the
+// #__UNIVERSAL_DATA_FOR_REHYDRATION__ script tag, and returns its contents
+// as a parsed JSON map.
 func (c *Client) getMessagesUniversalData() (MessagesUniversalData, error) {
 	resp, err := c.r.R().
 		SetHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8").
@@ -96,22 +139,29 @@ func extractUniversalData(body string) (string, error) {
 	return content, nil
 }
 
-func NewClient(cookieString string) *Client {
+// NewClient creates a TikTok IM client using the provided cookie string and
+// optional ClientConfig overrides. Pass a zero-value ClientConfig to use all
+// built-in defaults.
+func NewClient(cookieString string, cfg ClientConfig) *Client {
+	ua := cfg.userAgent()
+	imAPIBase := "https://" + cfg.imAPIHost()
+
 	r := resty.New()
 	r.SetHeader("Cookie", cookieString)
-	r.SetHeader("User-Agent", DefaultUserAgent)
+	r.SetHeader("User-Agent", ua)
 	r.SetHeader("Accept-Language", "en-US,en;q=0.9")
 	r.SetBaseURL("https://www.tiktok.com")
 
 	rIA := resty.New()
 	rIA.SetHeader("Cookie", cookieString)
-	rIA.SetHeader("User-Agent", DefaultUserAgent)
+	rIA.SetHeader("User-Agent", ua)
 	rIA.SetHeader("Accept-Language", "en-US,en;q=0.9")
 	rIA.SetHeader("Referer", "https://www.tiktok.com/")
-	rIA.SetBaseURL("https://im-api-sg.tiktok.com")
+	rIA.SetBaseURL(imAPIBase)
 	return &Client{
 		r:   r,
 		rIA: rIA,
+		cfg: cfg,
 	}
 }
 

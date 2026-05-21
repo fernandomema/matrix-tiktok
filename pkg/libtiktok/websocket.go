@@ -84,8 +84,8 @@ type WSMessageDeletion struct {
 // WebSocket URL derivation
 // ────────────────────────────────────────────────────────────────────────────
 
-// deriveWSURL assembles the wss://im-ws-sg.tiktok.com/ws/v2 URL that the
-// TikTok web client connects to for real-time IM events.
+// deriveWSURL assembles the wss://im-ws.tiktok.com/ws/v2 URL (or a configured
+// alternative host) that the TikTok web client connects to for real-time IM events.
 //
 // The access_key is derived as:
 //
@@ -138,7 +138,7 @@ func (c *Client) deriveWSURL() (string, error) {
 		"xaack":           {"1"},
 		"xsqos":           {"0"},
 	}
-	return "wss://im-ws-sg.tiktok.com/ws/v2?" + params.Encode(), nil
+	return "wss://" + c.cfg.imWSHost() + "/ws/v2?" + params.Encode(), nil
 }
 
 // ────────────────────────────────────────────────────────────────────────────

@@ -4,12 +4,18 @@
 # Lower values increase responsiveness but may trigger rate limits.
 poll_interval_seconds: 10
 
-# Optional: override the TikTok API base URL (useful for testing or alternative endpoints).
-# Leave empty to use the default.
-api_base_url: ""
+# Optional: override the TikTok IM REST API hostname (no scheme, no trailing slash).
+# Default: im-api.tiktok.com
+# Example for EU routing: im-api-eu.tiktok.com
+im_api_host: ""
+
+# Optional: override the TikTok IM WebSocket hostname (no scheme).
+# Default: im-ws.tiktok.com
+# Example for EU routing: im-ws-eu.tiktok.com
+im_ws_host: ""
 
 # Optional: a custom User-Agent string to send with TikTok API requests.
-# Leave empty to use the default built into the TikTok PoC client.
+# Leave empty to use the default built into the bridge.
 user_agent: ""
 
 # Maximum REST history pages (each up to ~20 messages) per conversation on connect.

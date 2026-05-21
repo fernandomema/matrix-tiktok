@@ -38,6 +38,14 @@ This repository is a Matrix bridge for TikTok messaging. Most work falls into on
 - `Conversation.SourceID` is important for follow-up operations like history fetch and reactions.
 - `ClientMessageID` is the most useful stable logical message key across REST and WebSocket paths.
 
+## Inbox API — Known Limitations
+
+- The `get_by_user_combo` endpoint (field 204, sub_command=10011) returns **50 conversation detail objects** but only **~10 unique conversation IDs**. The remaining 40 are duplicates (same conversation IDs with different state versions).
+- The legacy `user_init_list` endpoint (field 203) consistently returns 0 entries and 0 conversations in the response when the modern combo endpoint is used.
+- Sending `with_cold=true` and `include_removed_group=true` via field 203 does not increase the unique conversation count — TikTok's web API is hard-limited to ~10 conversations server-side.
+- Pagination (`cursor_ts_us` / `next_cursor`) is always 0 for this endpoint — no pagination is available.
+- The `GetInbox` function currently ignores the `MaxInboxPages` config parameter; getting more conversations would require a different API endpoint (e.g., mobile API).
+
 ## Verification
 
 - If you change protobuf schemas, regenerate code before testing.

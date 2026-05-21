@@ -13,6 +13,20 @@ import (
 
 // GetUserInfo fetches live profile data for a TikTok ghost user.
 func (tc *TikTokClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
+	// Sender ID "1" is a synthetic system account used for streak/system messages.
+	// It does not correspond to a real TikTok user, so return a static profile.
+	if string(ghost.ID) == "1" {
+		name := "TikTok"
+		return &bridgev2.UserInfo{
+			Name:        &name,
+			Identifiers: []string{"tiktok:system"},
+			Avatar: &bridgev2.Avatar{
+				ID:     "remove",
+				Remove: true,
+			},
+		}, nil
+	}
+
 	user, err := tc.apiClient.GetUser(ctx, string(ghost.ID))
 	if err != nil {
 		return nil, fmt.Errorf("get user info for %s: %w", ghost.ID, err)

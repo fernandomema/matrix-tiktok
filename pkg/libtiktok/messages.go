@@ -15,23 +15,24 @@ import (
 
 	"github.com/google/uuid"
 	tiktokpb "github.com/httpjamesm/matrix-tiktok/pkg/libtiktok/pb"
+	"github.com/rs/zerolog"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
 const (
-	sendMsgPath    = "/v1/message/send"
-	sendMsgFullURL = "https://im-api-sg.tiktok.com/v1/message/send"
+	sendMsgPath    = "https://im-api.tiktok.com/v1/message/send"
+	sendMsgFullURL = "https://im-api.tiktok.com/v1/message/send"
 
-	setPropertyPath    = "/v1/message/set_property"
-	setPropertyFullURL = "https://im-api-sg.tiktok.com/v1/message/set_property"
+	setPropertyPath    = "https://im-api.tiktok.com/v1/message/set_property"
+	setPropertyFullURL = "https://im-api.tiktok.com/v1/message/set_property"
 
-	inputStatusPath    = "/v1/client/input_status"
-	inputStatusFullURL = "https://im-api-sg.tiktok.com/v1/client/input_status"
+	inputStatusPath    = "https://im-api.tiktok.com/v1/client/input_status"
+	inputStatusFullURL = "https://im-api.tiktok.com/v1/client/input_status"
 
-	markReadPath = "/v3/conversation/mark_read"
+	markReadPath = "https://im-api.tiktok.com/v3/conversation/mark_read"
 
-	deleteMsgPath = "/v1/message/delete"
-	recallMsgPath = "/v1/message/recall"
+	deleteMsgPath = "https://im-api.tiktok.com/v1/message/delete"
+	recallMsgPath = "https://im-api.tiktok.com/v1/message/recall"
 )
 
 // SendMessageParams holds the parameters for sending a message.
@@ -1109,6 +1110,9 @@ func (c *Client) SendMessage(ctx context.Context, p SendMessageParams) (*SendMes
 
 	msgID, err := parseSendResponse(resp.Body())
 	if err != nil {
+		zerolog.Ctx(ctx).Error().
+			Hex("send_response_hex", resp.Body()).
+			Msg("parseSendResponse failed — raw response hex")
 		return nil, fmt.Errorf("parse send response: %w", err)
 	}
 

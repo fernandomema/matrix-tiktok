@@ -688,7 +688,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	client := libtiktok.NewClient(cfg.Auth.Cookie)
+	client := libtiktok.NewClient(cfg.Auth.Cookie, libtiktok.ClientConfig{})
 	reader := bufio.NewReader(os.Stdin)
 
 	clearScreen()
@@ -707,7 +707,7 @@ func main() {
 		fmt.Printf("  Signed in as @%s (%s)\n", self.UniqueID, self.UserID)
 	}
 
-	convs, err := client.GetInbox(ctx)
+	convs, err := client.GetInbox(ctx, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n  GetInbox error: %v\n", err)
 		os.Exit(1)

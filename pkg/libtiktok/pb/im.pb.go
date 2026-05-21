@@ -870,6 +870,7 @@ func (x *InboxRequestPayload) GetUserInitList() *GetUserConversationListRequestB
 	return nil
 }
 
+
 // Inner request body for the 203 "user_init_list" / inbox bootstrap call.
 //
 // Names and wire order are taken from the web client's protobufjs bundle; only
@@ -1100,6 +1101,8 @@ func (x *InboxResponse) GetPayload() *InboxResponsePayload {
 type InboxResponsePayload struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	UserInitList  *InboxConversationList `protobuf:"bytes,203,opt,name=user_init_list,json=userInitList" json:"user_init_list,omitempty"`
+	// Used by the type-204/10011 get_by_user_combo response.
+	UserComboList *InboxConversationList `protobuf:"bytes,204,opt,name=user_combo_list,json=userComboList" json:"user_combo_list,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1137,6 +1140,13 @@ func (*InboxResponsePayload) Descriptor() ([]byte, []int) {
 func (x *InboxResponsePayload) GetUserInitList() *InboxConversationList {
 	if x != nil {
 		return x.UserInitList
+	}
+	return nil
+}
+
+func (x *InboxResponsePayload) GetUserComboList() *InboxConversationList {
+	if x != nil {
+		return x.UserComboList
 	}
 	return nil
 }
@@ -1352,9 +1362,15 @@ type InboxConversationDetail struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	ConversationId *string                `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId" json:"conversation_id,omitempty"`
 	// Numeric conversation/source ID reused by follow-up APIs.
+	// NOTE: In get_by_user_init responses this field holds the source_id used by
+	// get_by_conversation. In get_by_user_combo responses, field 2 holds
+	// conversation_type (1=DM) and the real source_id is at field 5 (SourceIdCombo).
 	SourceId         *uint64                   `protobuf:"varint,2,opt,name=source_id,json=sourceId" json:"source_id,omitempty"`
 	ConversationType *uint64                   `protobuf:"varint,3,opt,name=conversation_type,json=conversationType" json:"conversation_type,omitempty"`
 	Deprecated       *string                   `protobuf:"bytes,4,opt,name=deprecated" json:"deprecated,omitempty"`
+	// SourceIdCombo holds the source_id used by get_by_conversation when
+	// the conversation was obtained via get_by_user_combo (field 5 on wire).
+	SourceIdCombo    *uint64                   `protobuf:"varint,5,opt,name=source_id_combo,json=sourceIdCombo" json:"source_id_combo,omitempty"`
 	Members          *InboxConversationMembers `protobuf:"bytes,6,opt,name=members" json:"members,omitempty"`
 	Reserved_7       *uint64                   `protobuf:"varint,7,opt,name=reserved_7,json=reserved7" json:"reserved_7,omitempty"`
 	Reserved_8       *uint64                   `protobuf:"varint,8,opt,name=reserved_8,json=reserved8" json:"reserved_8,omitempty"`
@@ -1422,6 +1438,13 @@ func (x *InboxConversationDetail) GetDeprecated() string {
 		return *x.Deprecated
 	}
 	return ""
+}
+
+func (x *InboxConversationDetail) GetSourceIdCombo() uint64 {
+	if x != nil && x.SourceIdCombo != nil {
+		return *x.SourceIdCombo
+	}
+	return 0
 }
 
 func (x *InboxConversationDetail) GetMembers() *InboxConversationMembers {

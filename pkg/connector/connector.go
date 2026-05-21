@@ -8,6 +8,8 @@ import (
 	"go.mau.fi/util/configupgrade"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
+
+	"github.com/httpjamesm/matrix-tiktok/pkg/libtiktok"
 )
 
 // TikTokConnector is the main entrypoint for the TikTok bridge connector.
@@ -54,8 +56,7 @@ func (tc *TikTokConnector) GetName() bridgev2.BridgeName {
 	return bridgev2.BridgeName{
 		DisplayName: "TikTok",
 		NetworkURL:  "https://www.tiktok.com",
-		// TODO: upload a real TikTok icon to a Matrix server and replace this URI.
-		NetworkIcon:      "mxc://maunium.net/TODO",
+		NetworkIcon:      "mxc://local.beeper.com/fernandomema_azb2S6ppTszSpWy4G3DrSVJPQOexiZmYRwKGcrCa0AorGvNjwouf6hOxUj4ls3ry",
 		NetworkID:        "tiktok",
 		BeeperBridgeType: "github.com/httpjamesm/matrix-tiktok",
 		// Port chosen to avoid conflicts; register at https://mau.fi/ports if needed.
@@ -73,8 +74,12 @@ func (tc *TikTokConnector) GetName() bridgev2.BridgeName {
 type Config struct {
 	// How often to poll TikTok for new messages.
 	PollIntervalSeconds int `yaml:"poll_interval_seconds"`
-	// Optional override for the TikTok API base URL.
-	APIBaseURL string `yaml:"api_base_url"`
+	// Optional override for the TikTok IM REST API hostname (no scheme).
+	// Default: im-api.tiktok.com
+	IMAPIHost string `yaml:"im_api_host"`
+	// Optional override for the TikTok IM WebSocket hostname (no scheme).
+	// Default: im-ws.tiktok.com
+	IMWSHost string `yaml:"im_ws_host"`
 	// Optional override for the TikTok HTTP User-Agent.
 	UserAgent string `yaml:"user_agent"`
 	// Maximum REST history pages to fetch per conversation on connect.
@@ -84,10 +89,22 @@ type Config struct {
 	// Maximum number of inbox conversations to history-fetch on connect.
 	// Zero means all inbox conversations.
 	InitialBackfillMaxConversations int `yaml:"initial_backfill_max_conversations"`
+	// Maximum number of inbox pages to fetch on connect (each page ~50 conversations).
+	// Zero means no limit (fetch all pages). Default 0.
+	MaxInboxPages int `yaml:"max_inbox_pages"`
 	// For portals without a stored checkpoint, optionally ignore messages older
 	// than this many hours. Zero means no time limit (backfill until history is
 	// exhausted or initial_backfill_max_pages is hit).
 	InitialBackfillLookbackHours int `yaml:"initial_backfill_lookback_hours"`
+}
+
+// clientConfig converts connector Config fields into a libtiktok.ClientConfig.
+func (c *Config) clientConfig() libtiktok.ClientConfig {
+	return libtiktok.ClientConfig{
+		IMAPIHost: c.IMAPIHost,
+		IMWSHost:  c.IMWSHost,
+		UserAgent: c.UserAgent,
+	}
 }
 
 //go:embed example-config.yaml

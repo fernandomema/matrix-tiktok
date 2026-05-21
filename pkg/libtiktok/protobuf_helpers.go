@@ -6,8 +6,45 @@ import (
 	"strings"
 
 	tiktokpb "github.com/httpjamesm/matrix-tiktok/pkg/libtiktok/pb"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
+
+// extractVarintField scans unknown protobuf wire bytes for the first occurrence
+// of the given field number with varint wire type and returns its value.
+// Returns 0 if not found.
+func extractVarintField(unknown []byte, fieldNum protowire.Number) uint64 {
+	for len(unknown) > 0 {
+		num, typ, n := protowire.ConsumeTag(unknown)
+		if n < 0 {
+			return 0
+		}
+		unknown = unknown[n:]
+		if typ == protowire.VarintType {
+			v, n2 := protowire.ConsumeVarint(unknown)
+			if n2 < 0 {
+				return 0
+			}
+			if num == fieldNum {
+				return v
+			}
+			unknown = unknown[n2:]
+		} else if typ == protowire.BytesType {
+			_, n2 := protowire.ConsumeBytes(unknown)
+			if n2 < 0 {
+				return 0
+			}
+			unknown = unknown[n2:]
+		} else {
+			return 0
+		}
+	}
+	return 0
+}
+
+func protoBool(v bool) *bool {
+	return &v
+}
 
 func protoString(v string) *string {
 	return &v
@@ -175,10 +212,28 @@ func parseConversationDetailProto(detail *tiktokpb.InboxConversationDetail) (Con
 	if sourceID == 0 {
 		sourceID = detail.GetCore().GetSourceId()
 	}
+	// The combo endpoint (get_by_user_combo) encodes conversation_type at wire
+	// field 2 and the real source_id at wire field 5. Since field 5 is not in
+	// the compiled proto descriptor, it lands in unknown fields — extract it.
+	if comboSourceID := extractVarintField(detail.ProtoReflect().GetUnknown(), 5); comboSourceID > 10 {
+		sourceID = comboSourceID
+	}
 
 	conversationType := detail.GetConversationType()
 	if conversationType == 0 {
 		conversationType = detail.GetCore().GetConversationType()
+	}
+	// In the combo response, wire field 2 = conversation_type (1=DM) and
+	// wire field 3 = a timestamp. If field 5 (source_id) is present in unknown
+	// fields, we know this is a combo entry: use GetSourceId() as the type.
+	if extractVarintField(detail.ProtoReflect().GetUnknown(), 5) > 0 {
+		if t := detail.GetSourceId(); t > 0 && t <= 10 {
+			conversationType = t
+		} else if conversationType > 1000000 {
+			conversationType = 1
+		}
+	} else if conversationType > 1000000 {
+		conversationType = 1 // looks like timestamp, assume DM
 	}
 	name := detail.GetCore().GetTitle()
 

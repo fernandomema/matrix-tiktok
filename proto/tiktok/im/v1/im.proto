@@ -136,10 +136,31 @@ message InboxRequest {
   optional uint64 final_flag = 18;
 }
 
-// Typed payload wrapper for the type-203 request envelope.
+// Typed payload wrapper for the type-203/204 request envelope.
 message InboxRequestPayload {
   // Inner body matches the web client's im_proto.GetUserConversationListRequestBody.
   optional GetUserConversationListRequestBody user_init_list = 203;
+  // Used by the type-204/sub_command-10011 get_by_user_combo endpoint.
+  optional GetUserComboRequestBody user_combo = 204;
+}
+
+// Inner request body for the 204/10011 "get_by_user_combo" combo inbox call.
+// Field 8 of the outer envelope carries this as the payload.
+// Inner structure (from browser capture):
+//   field 204 → field 1 → fields 1,2,3,4
+//     field 1 (varint): 0 (unknown, always 0)
+//     field 2 (varint): cursor_ts_us (microsecond timestamp; 0 = from beginning)
+//     field 3 (varint): limit (50 in browser captures)
+//     field 4 (varint): 8 (unknown flag, always 8)
+message GetUserComboRequestBody {
+  optional GetUserComboInner inner = 1;
+}
+
+message GetUserComboInner {
+  optional uint64 reserved_1 = 1;
+  optional uint64 cursor_ts_us = 2;
+  optional uint64 limit = 3;
+  optional uint64 reserved_4 = 4;
 }
 
 // Inner request body for the 203 "user_init_list" / inbox bootstrap call.
@@ -193,6 +214,8 @@ message InboxResponse {
 // Typed payload wrapper for inbox responses.
 message InboxResponsePayload {
   optional InboxConversationList user_init_list = 203;
+  // Used by the type-204/10011 get_by_user_combo response.
+  optional InboxConversationList user_combo_list = 204;
 }
 
 // Inbox bootstrap payload.
