@@ -20,6 +20,7 @@ RUN apt-get update \
 WORKDIR /src
 
 COPY go.mod go.sum ./
+COPY patches/mautrix ./patches/mautrix/
 RUN go mod download
 
 COPY . .
